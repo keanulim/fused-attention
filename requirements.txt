@@ -1,0 +1,6 @@
+# Local development / CI deps (Modal container uses pip_install in modal_app.py)
+modal>=0.67
+torch>=2.3.1
+ninja
+einops
+pytest
