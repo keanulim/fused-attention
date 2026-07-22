@@ -3,8 +3,8 @@ Modal application — fused attention kernel on GPU.
 
 Usage
 -----
-# Test standalone matmul kernel
-modal run modal_app.py::test_matmul
+# individual kernel testing
+modal run modal_app.py::test_kernel
 
 # Run correctness tests
 modal run modal_app.py::run_tests
@@ -38,6 +38,7 @@ cuda_image = (
     .pip_install(
         "torch==2.3.1",          # pinned — update to taste
         "ninja",                  # speeds up JIT compilation
+        "numpy",
         "einops",
         "pytest",
         extra_index_url="https://download.pytorch.org/whl/cu124",
@@ -74,11 +75,11 @@ def _setup():
 # ---------------------------------------------------------------------------
 
 @app.function(**CONTAINER_KWARGS)
-def test_matmul() -> str:
+def test_kernel() -> str:
     """
     Compile and run kernel/naive_attn.cu on GPU.
 
-        modal run modal_app.py::test_matmul
+        modal run modal_app.py::test_kernel
     """
     import subprocess
 
@@ -88,9 +89,10 @@ def test_matmul() -> str:
             "nvcc",
             "naive_attn.cu",
             "-o",
-            "matmul_test",
+            "kernel_test",
             "-O2",
             "--gpu-architecture=sm_80",
+            "-DNAIVE_ATTN_STANDALONE",
         ],
         cwd=kernel_dir,
         capture_output=True,
@@ -102,7 +104,7 @@ def test_matmul() -> str:
         raise RuntimeError("nvcc compile failed")
 
     run = subprocess.run(
-        ["./matmul_test"],
+        ["./kernel_test"],
         cwd=kernel_dir,
         capture_output=True,
         text=True,
@@ -110,7 +112,7 @@ def test_matmul() -> str:
     print(run.stdout)
     if run.returncode != 0:
         print(run.stderr)
-        raise RuntimeError("matmul test failed")
+        raise RuntimeError("kernel test failed")
     return run.stdout
 
 
@@ -152,6 +154,8 @@ def health_check() -> dict:
 def run_tests():
     """Run the correctness test suite with pytest."""
     _setup()
+    from ops.attention import _load_naive_extension
+    _load_naive_extension()
     import subprocess
     result = subprocess.run(
         ["python", "-m", "pytest", "tests/", "-v", "--tb=short"],

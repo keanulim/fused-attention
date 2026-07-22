@@ -9,6 +9,8 @@ inside the same Modal container are fast.
 from __future__ import annotations
 
 import math
+import os
+import threading
 from pathlib import Path
 
 import torch
@@ -21,6 +23,8 @@ from torch.utils.cpp_extension import load
 
 _KERNEL_DIR = Path(__file__).parent.parent / "kernel"
 _EXT: object | None = None
+_NAIVE_EXT: object | None = None
+_NAIVE_EXT_LOCK = threading.Lock()
 
 
 def _load_extension() -> object:
@@ -45,6 +49,76 @@ def _load_extension() -> object:
         verbose=True,
     )
     return _EXT
+
+
+def _load_naive_extension() -> object:
+    global _NAIVE_EXT
+    if _NAIVE_EXT is not None:
+        return _NAIVE_EXT
+
+    with _NAIVE_EXT_LOCK:
+        if _NAIVE_EXT is not None:
+            return _NAIVE_EXT
+
+        os.makedirs("/tmp/naive_attn_ext", exist_ok=True)
+        _NAIVE_EXT = load(
+            name="naive_attn_cuda",
+            sources=[
+                str(_KERNEL_DIR / "naive_attn_binding.cpp"),
+                str(_KERNEL_DIR / "naive_attn.cu"),
+            ],
+            extra_cuda_cflags=[
+                "-O2",
+                "--use_fast_math",
+                "-std=c++17",
+            ],
+            build_directory="/tmp/naive_attn_ext",
+            verbose=True,
+        )
+        return _NAIVE_EXT
+
+
+def cuda_naive_attention(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    causal: bool = False,
+) -> torch.Tensor:
+    """
+    Run the naive multi-kernel CUDA attention implementation.
+
+    Supports [batch, heads, seq_len, head_dim] by looping over batch/heads.
+    Uses float32 on CUDA and compares cleanly against naive_attention().
+
+    Note: causal masking is not yet wired through the CUDA scale kernel.
+    """
+    if causal:
+        raise NotImplementedError(
+            "CUDA naive attention does not support causal=True yet"
+        )
+
+    Q = Q.float().contiguous()
+    K = K.float().contiguous()
+    V = V.float().contiguous()
+
+    if not Q.is_cuda:
+        Q = Q.cuda()
+        K = K.cuda()
+        V = V.cuda()
+
+    B, H, N, D = Q.shape
+    O = torch.empty(B, H, N, D, dtype=torch.float32, device=Q.device)
+    ext = _load_naive_extension()
+
+    for b in range(B):
+        for h in range(H):
+            q = Q[b, h]
+            k = K[b, h]
+            v = V[b, h]
+            o = O[b, h]
+            ext.naive_attn_fwd(q, k, v, o)
+
+    return O
 
 
 def flash_attention(

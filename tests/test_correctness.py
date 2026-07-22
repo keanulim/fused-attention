@@ -3,8 +3,7 @@ Correctness tests.
 
 Two groups:
   - test_naive_*  : pure PyTorch, no kernel, runs anywhere right now.
-  - test_kernel_* : requires the compiled CUDA kernel; will be skipped
-                    if flash_attn.cu has not been written yet.
+  - test_kernel_* : requires the compiled naive CUDA kernel + GPU.
 
 Run locally (CPU fine for naive tests):
     pytest tests/ -v
@@ -17,12 +16,11 @@ import pytest
 import torch
 
 # ---------------------------------------------------------------------------
-# Attempt to import the kernel. If the .cu file doesn't exist yet, the
-# kernel tests are automatically skipped — naive tests still run.
+# Attempt to import the naive CUDA kernel.
 # ---------------------------------------------------------------------------
 
 try:
-    from ops.attention import flash_attention
+    from ops.attention import cuda_naive_attention
     _KERNEL_AVAILABLE = True
 except Exception:
     _KERNEL_AVAILABLE = False
@@ -31,13 +29,12 @@ from ops.attention import naive_attention
 
 requires_kernel = pytest.mark.skipif(
     not _KERNEL_AVAILABLE,
-    reason="CUDA kernel not yet compiled (flash_attn.cu not found)"
+    reason="CUDA naive kernel not yet compiled"
 )
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="CUDA device not available"
 )
-
 
 # ---------------------------------------------------------------------------
 # Reference tests — always run, no kernel needed
@@ -47,6 +44,12 @@ SHAPES = [
     (1, 1,   4,   4),   # tiny — easy to debug by eye
     (1, 4, 128,  64),
     (2, 8, 512, 128),
+]
+
+KERNEL_SHAPES = [
+    (1, 1,   4,   4),
+    (1, 2,  16,  16),
+    (2, 2,  32,  16),   # requires N*N <= 1024 threads per block
 ]
 
 
@@ -90,19 +93,19 @@ def test_naive_softmax_rows_sum_to_one():
 
 
 # ---------------------------------------------------------------------------
-# Kernel tests — skipped until flash_attn.cu exists
+# Kernel tests — compare CUDA naive attention vs PyTorch reference
 # ---------------------------------------------------------------------------
 
 @requires_kernel
 @requires_cuda
-@pytest.mark.parametrize("B,H,N,D", SHAPES)
-@pytest.mark.parametrize("causal", [False, True])
-def test_kernel_vs_naive(B, H, N, D, causal):
-    Q = torch.randn(B, H, N, D, dtype=torch.float16, device="cuda")
-    K = torch.randn(B, H, N, D, dtype=torch.float16, device="cuda")
-    V = torch.randn(B, H, N, D, dtype=torch.float16, device="cuda")
+@pytest.mark.parametrize("B,H,N,D", KERNEL_SHAPES)
+def test_kernel_vs_naive(B, H, N, D):
+    torch.manual_seed(0)
+    Q = torch.randn(B, H, N, D, device="cuda")
+    K = torch.randn(B, H, N, D, device="cuda")
+    V = torch.randn(B, H, N, D, device="cuda")
 
-    out_kernel = flash_attention(Q, K, V, causal=causal)
-    out_ref    = naive_attention(Q, K, V, causal=causal).half()
+    out_kernel = cuda_naive_attention(Q, K, V, causal=False)
+    out_ref = naive_attention(Q, K, V, causal=False)
 
-    torch.testing.assert_close(out_kernel, out_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(out_kernel, out_ref, atol=1e-3, rtol=1e-3)
