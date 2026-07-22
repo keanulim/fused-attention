@@ -14,6 +14,39 @@ __global__ void matmul(const float *A, const float *B, float *C, int N, int D){
         C[i * N + j] = dot;
     }
 }
+
+__global__ void scale(const float *A, float *B, int N, int D){
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if(i<N*N){
+        B[i] = A[i] * 1 / sqrtf((float)D);
+    }
+}
+
+__global__ void softmax(const float *S, float *P, int N){
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+
+    float row_max = 0.0f;
+    for(int i = 0; i < N; i++){
+        if (S[j * N + i] > row_max) row_max = S[i];
+    }
+
+    float *exp_score;
+    for(int i = 0; i < N; i++){
+        exp_score[i] = exp(S[i] - row_max)
+    }
+
+    float sum = 0.0f;
+    for(int i = 0; i < N; i++){
+        sum += exp_score[i];
+    }
+
+    for(int i = 0; i < N; i++){
+        P[j * N + i] = exp_score[i] / sum;
+    }
+}
+
+
+
 __host__ void matmulLaunch(int N, int D, const float *h_A, const float *h_B, float *h_C){
     
     float *d_A, *d_B, *d_C;
