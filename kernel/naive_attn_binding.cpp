@@ -4,29 +4,22 @@
 
 #include <torch/extension.h>
 
-void attentionLaunch(
-    const float *h_Q,
-    const float *h_K,
-    const float *h_V,
-    float *h_O,
-    int N,
-    int D
-);
-
 void attentionLaunchDevice(
     const float *d_Q,
     const float *d_K,
     const float *d_V,
     float *d_O,
     int N,
-    int D
+    int D,
+    bool causal
 );
 
 static void naive_attn_launch(
     const torch::Tensor& Q,
     const torch::Tensor& K,
     const torch::Tensor& V,
-    torch::Tensor& O
+    torch::Tensor& O,
+    bool causal
 ) {
     TORCH_CHECK(Q.is_cuda(), "Q must be a CUDA tensor");
     TORCH_CHECK(Q.scalar_type() == torch::kFloat32, "Q must be float32");
@@ -49,7 +42,8 @@ static void naive_attn_launch(
         V.data_ptr<float>(),
         O.data_ptr<float>(),
         N,
-        D
+        D,
+        causal
     );
 }
 
@@ -61,6 +55,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("Q"),
         py::arg("K"),
         py::arg("V"),
-        py::arg("O")
+        py::arg("O"),
+        py::arg("causal") = false
     );
 }

@@ -9,8 +9,8 @@ modal run modal_app.py::test_kernel
 # Run correctness tests
 modal run modal_app.py::run_tests
 
-# Run a single benchmark
-modal run modal_app.py::run_benchmark --seq-len 4096
+# Run a single benchmark (naive CUDA vs PyTorch vs SDPA)
+modal run modal_app.py::run_benchmark --seq-len 1024
 
 # Sweep benchmark across sequence lengths
 modal run modal_app.py::sweep
@@ -172,77 +172,35 @@ def run_tests():
 
 @app.function(**CONTAINER_KWARGS)
 def run_benchmark(
-    seq_len: int = 2048,
-    batch: int = 4,
-    heads: int = 16,
-    head_dim: int = 128,
-    causal: bool = True,
+    seq_len: int = 1024,
+    batch: int = 1,
+    heads: int = 8,
+    head_dim: int = 64,
+    causal: bool = False,
     warmup: int = 10,
     iters: int = 50,
 ) -> dict:
     """
-    Time the fused kernel against PyTorch's built-in SDPA.
-    Returns a dict with latency and bandwidth stats.
+    Time cuda_naive_attention vs PyTorch naive vs SDPA (F32 and F16).
+
+        modal run modal_app.py::run_benchmark --seq-len 1024
+        modal run modal_app.py::run_benchmark --seq-len 512 --causal
     """
     _setup()
-    import torch
-    from ops.attention import flash_attention, naive_attention
+    from benchmark import format_benchmark_row, print_benchmark_header, run_attention_benchmark
 
-    dtype  = torch.float16
-    device = "cuda"
-    shape  = (batch, heads, seq_len, head_dim)
-
-    Q = torch.randn(shape, dtype=dtype, device=device)
-    K = torch.randn(shape, dtype=dtype, device=device)
-    V = torch.randn(shape, dtype=dtype, device=device)
-
-    def time_fn(fn, *args, **kwargs):
-        # Warmup
-        for _ in range(warmup):
-            fn(*args, **kwargs)
-        torch.cuda.synchronize()
-
-        start = torch.cuda.Event(enable_timing=True)
-        end   = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(iters):
-            fn(*args, **kwargs)
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) / iters  # ms
-
-    # Fused kernel
-    fused_ms = time_fn(flash_attention, Q, K, V, causal)
-
-    # PyTorch SDPA (uses FlashAttention internally on Ampere+)
-    sdpa_ms = time_fn(
-        torch.nn.functional.scaled_dot_product_attention,
-        Q, K, V,
-        is_causal=causal,
+    result = run_attention_benchmark(
+        seq_len=seq_len,
+        batch=batch,
+        heads=heads,
+        head_dim=head_dim,
+        causal=causal,
+        warmup=warmup,
+        iters=iters,
     )
-
-    # Theoretical memory traffic (bytes read + written, ignoring intermediates)
-    elem_bytes  = 2  # float16
-    qkv_bytes   = 3 * batch * heads * seq_len * head_dim * elem_bytes
-    o_bytes     = batch * heads * seq_len * head_dim * elem_bytes
-    total_bytes = qkv_bytes + o_bytes
-
-    fused_bw  = total_bytes / (fused_ms * 1e-3) / 1e9   # GB/s
-    sdpa_bw   = total_bytes / (sdpa_ms  * 1e-3) / 1e9
-
-    result = {
-        "seq_len":   seq_len,
-        "batch":     batch,
-        "heads":     heads,
-        "head_dim":  head_dim,
-        "causal":    causal,
-        "fused_ms":  round(fused_ms,  3),
-        "sdpa_ms":   round(sdpa_ms,   3),
-        "fused_bw_GBs":  round(fused_bw,  1),
-        "sdpa_bw_GBs":   round(sdpa_bw,   1),
-        "speedup":   round(sdpa_ms / fused_ms, 3),
-    }
     print(result)
+    print_benchmark_header()
+    print(format_benchmark_row(result))
     return result
 
 
@@ -278,25 +236,22 @@ def correctness_check(
 
 @app.local_entrypoint()
 def sweep():
-    seq_lens = [512, 1024, 2048, 4096, 8192]
+    from benchmark import format_benchmark_row, print_benchmark_header
 
-    print("Running correctness check...")
-    ok = correctness_check.remote(seq_len=512, causal=False)
-    if not ok:
-        raise RuntimeError("Correctness check failed — fix the kernel before benchmarking")
+    seq_lens = [256, 512, 1024, 2048, 4096]
 
-    print(f"\n{'seq_len':>8}  {'fused_ms':>10}  {'sdpa_ms':>9}  {'speedup':>8}  {'fused_BW':>10}")
-    print("-" * 55)
+    print("Running correctness tests...")
+    tests_out = run_tests.remote()
+    if "failed" in tests_out.lower():
+        raise RuntimeError("Tests failed — fix correctness before benchmarking")
 
-    # Fire all benchmark calls in parallel
-    futures = [run_benchmark.spawn(seq_len=s) for s in seq_lens]
-    results = [f.get() for f in futures]
+    print_benchmark_header()
 
-    for r in sorted(results, key=lambda x: x["seq_len"]):
-        print(
-            f"{r['seq_len']:>8}  "
-            f"{r['fused_ms']:>10.3f}  "
-            f"{r['sdpa_ms']:>9.3f}  "
-            f"{r['speedup']:>8.3f}x  "
-            f"{r['fused_bw_GBs']:>8.1f} GB/s"
-        )
+    results = []
+    for seq_len in seq_lens:
+        r = run_benchmark.remote(seq_len=seq_len, warmup=5, iters=20)
+        results.append(r)
+        print(format_benchmark_row(r))
+
+    print("\nDone. cuda_naive_ms / sdpa_f16 > 1 means SDPA is faster.")
+    return results

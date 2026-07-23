@@ -99,13 +99,14 @@ def test_naive_softmax_rows_sum_to_one():
 @requires_kernel
 @requires_cuda
 @pytest.mark.parametrize("B,H,N,D", KERNEL_SHAPES)
-def test_kernel_vs_naive(B, H, N, D):
+@pytest.mark.parametrize("causal", [False, True])
+def test_kernel_vs_naive(B, H, N, D, causal):
     torch.manual_seed(0)
     Q = torch.randn(B, H, N, D, device="cuda")
     K = torch.randn(B, H, N, D, device="cuda")
     V = torch.randn(B, H, N, D, device="cuda")
 
-    out_kernel = cuda_naive_attention(Q, K, V, causal=False)
-    out_ref = naive_attention(Q, K, V, causal=False)
+    out_kernel = cuda_naive_attention(Q, K, V, causal=causal)
+    out_ref = naive_attention(Q, K, V, causal=causal)
 
     torch.testing.assert_close(out_kernel, out_ref, atol=1e-3, rtol=1e-3)

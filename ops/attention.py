@@ -90,13 +90,8 @@ def cuda_naive_attention(
     Supports [batch, heads, seq_len, head_dim] by looping over batch/heads.
     Uses float32 on CUDA and compares cleanly against naive_attention().
 
-    Note: causal masking is not yet wired through the CUDA scale kernel.
+    Note: causal masking is applied in the scale kernel.
     """
-    if causal:
-        raise NotImplementedError(
-            "CUDA naive attention does not support causal=True yet"
-        )
-
     Q = Q.float().contiguous()
     K = K.float().contiguous()
     V = V.float().contiguous()
@@ -116,7 +111,7 @@ def cuda_naive_attention(
             k = K[b, h]
             v = V[b, h]
             o = O[b, h]
-            ext.naive_attn_fwd(q, k, v, o)
+            ext.naive_attn_fwd(q, k, v, o, causal)
 
     return O
 

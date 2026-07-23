@@ -32,18 +32,19 @@ __global__ void matmul2(int N, int D, const float *d_B,
     }
     
 
-__global__ void scale(int N, int D, float *d_B){
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
+__global__ void scale(int N, int D, float *d_B, bool causal){
     int i = blockDim.y * blockIdx.y + threadIdx.y;
-    if(j<N && i < N){
-        /*if(i > j) d_B[j * N + i] = -INFINITY;
-        else */d_B[j * N + i] = d_B[j * N + i] * 1 / sqrtf((float)D);
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+    if(i < N && j < N){
+        d_B[i * N + j] = d_B[i * N + j] * (1.0f / sqrtf((float)D));
+        if(causal && i < j) d_B[i * N + j] = -INFINITY;
+        
     }
-    
 }
 
 __global__ void softmax(int N, float *d_B){
     int j = blockDim.x * blockIdx.x + threadIdx.x;
+    if (j >= N) return;
 
     float row_max = -INFINITY;
     for(int i = 0; i < N; i++){
@@ -67,27 +68,31 @@ __global__ void softmax(int N, float *d_B){
 
 __host__ void attentionLaunchDevice(
     const float *d_Q, const float *d_K, const float *d_V,
-    float *d_O, int N, int D){
+    float *d_O, int N, int D, bool causal){
 
     int sizeNN = N * N * sizeof(float);
 
     float *d_B;
     cudaMalloc(&d_B, sizeNN);
+    
+    const int TILE = 16;
+    const int grid_n = (N + TILE - 1) / TILE;
+    const int grid_d = (D + TILE - 1) / TILE;
+    dim3 dimGridNN(grid_n, grid_n);
+    dim3 dimGridND(grid_d, grid_n);
+    dim3 dimBlock(TILE, TILE);
+    
 
-    dim3 dimGrid(1,1,1);
-    dim3 dimBlock(N,N,1);
-    dim3 dimBlock2(D, N, 1);
-
-    matmul<<<dimGrid, dimBlock>>>(N, D, d_Q, d_K, d_B);
-    scale<<<dimGrid, dimBlock>>>(N, D, d_B);
-    softmax<<<dimGrid, N>>>(N, d_B);
-    matmul2<<<dimGrid, dimBlock2>>>(N, D, d_B, d_V, d_O);
+    matmul<<<dimGridNN, dimBlock>>>(N, D, d_Q, d_K, d_B);
+    scale<<<dimGridNN, dimBlock>>>(N, D, d_B, causal);
+    softmax<<<grid_n, TILE>>>(N, d_B);
+    matmul2<<<dimGridND, dimBlock>>>(N, D, d_B, d_V, d_O);
 
     cudaFree(d_B);
 }
 
 __host__ void attentionLaunch(const float *h_Q, const float *h_K, const float *h_V, 
-    float *h_O, int N, int D){
+    float *h_O, int N, int D, bool causal){
 
     int sizeND = N * D * sizeof(float);
 
@@ -101,7 +106,7 @@ __host__ void attentionLaunch(const float *h_Q, const float *h_K, const float *h
     cudaMemcpy(d_K, h_K, sizeND, cudaMemcpyHostToDevice);
     cudaMemcpy(d_V, h_V, sizeND, cudaMemcpyHostToDevice);
 
-    attentionLaunchDevice(d_Q, d_K, d_V, d_O, N, D);
+    attentionLaunchDevice(d_Q, d_K, d_V, d_O, N, D, causal);
 
     cudaMemcpy(h_O, d_O, sizeND, cudaMemcpyDeviceToHost);
 
@@ -123,7 +128,7 @@ int main() {
     float h_O[N*D];
     const float expected[N * N] = {0.5, 0.5, 0.5, 0.5};
 
-    attentionLaunch(h_Q, h_K, h_V, h_O, N, D);
+    attentionLaunch(h_Q, h_K, h_V, h_O, N, D, false);
 
     printf("O =\n");
     for (int i = 0; i < N; ++i) {
