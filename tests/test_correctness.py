@@ -25,11 +25,21 @@ try:
 except Exception:
     _KERNEL_AVAILABLE = False
 
+try:
+    from ops.attention import flash_attention
+    _FLASH_AVAILABLE = True
+except Exception:
+    _FLASH_AVAILABLE = False
+
 from ops.attention import naive_attention
 
 requires_kernel = pytest.mark.skipif(
     not _KERNEL_AVAILABLE,
     reason="CUDA naive kernel not yet compiled"
+)
+requires_flash = pytest.mark.skipif(
+    not _FLASH_AVAILABLE,
+    reason="CUDA flash kernel not yet compiled"
 )
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -50,6 +60,13 @@ KERNEL_SHAPES = [
     (1, 1,   4,   4),
     (1, 2,  16,  16),
     (2, 2,  32,  16),   # requires N*N <= 1024 threads per block
+]
+
+FLASH_SHAPES = [
+    (1, 1,   4,  64),
+    (1, 1,  32,  64),
+    (1, 2,  17,  64),   # partial tile
+    (2, 4,  64,  64),
 ]
 
 
@@ -110,3 +127,23 @@ def test_kernel_vs_naive(B, H, N, D, causal):
     out_ref = naive_attention(Q, K, V, causal=causal)
 
     torch.testing.assert_close(out_kernel, out_ref, atol=1e-3, rtol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Flash kernel tests — fused attention vs PyTorch reference (D=64 only)
+# ---------------------------------------------------------------------------
+
+@requires_flash
+@requires_cuda
+@pytest.mark.parametrize("B,H,N,D", FLASH_SHAPES)
+@pytest.mark.parametrize("causal", [False, True])
+def test_flash_vs_naive(B, H, N, D, causal):
+    torch.manual_seed(0)
+    Q = torch.randn(B, H, N, D, device="cuda")
+    K = torch.randn(B, H, N, D, device="cuda")
+    V = torch.randn(B, H, N, D, device="cuda")
+
+    out_flash = flash_attention(Q, K, V, causal=causal)
+    out_ref = naive_attention(Q, K, V, causal=causal)
+
+    torch.testing.assert_close(out_flash, out_ref, atol=1e-3, rtol=1e-3)

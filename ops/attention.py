@@ -32,6 +32,7 @@ def _load_extension() -> object:
     if _EXT is not None:
         return _EXT
 
+    os.makedirs("/tmp/flash_attn_ext", exist_ok=True)
     _EXT = load(
         name="flash_attn_cuda",
         sources=[
@@ -126,16 +127,25 @@ def flash_attention(
     Run fused flash attention (inference only).
 
     Args:
-        Q: [batch, heads, seq_len, head_dim]  — must be float16, contiguous
+        Q: [batch, heads, seq_len, head_dim]  — float32 for v1 (head_dim=64)
         K: same shape as Q
         V: same shape as Q
         causal: apply causal (autoregressive) mask
 
     Returns:
-        O: [batch, heads, seq_len, head_dim]  float16
+        O: [batch, heads, seq_len, head_dim]  float32
     """
-    assert Q.dtype == torch.float16, "flash_attention requires float16 inputs"
-    assert Q.is_contiguous() and K.is_contiguous() and V.is_contiguous()
+    Q = Q.float().contiguous()
+    K = K.float().contiguous()
+    V = V.float().contiguous()
+
+    if not Q.is_cuda:
+        Q = Q.cuda()
+        K = K.cuda()
+        V = V.cuda()
+
+    if Q.size(-1) != 64:
+        raise ValueError("flash_attention v1 supports head_dim=64 only")
 
     O = torch.empty_like(Q)
     ext = _load_extension()

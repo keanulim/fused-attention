@@ -154,8 +154,9 @@ def health_check() -> dict:
 def run_tests():
     """Run the correctness test suite with pytest."""
     _setup()
-    from ops.attention import _load_naive_extension
+    from ops.attention import _load_extension, _load_naive_extension
     _load_naive_extension()
+    _load_extension()
     import subprocess
     result = subprocess.run(
         ["python", "-m", "pytest", "tests/", "-v", "--tb=short"],
@@ -215,16 +216,16 @@ def correctness_check(
     from ops.attention import flash_attention, naive_attention
 
     B, H, D = 2, 8, 64
-    Q = torch.randn(B, H, seq_len, D, dtype=torch.float16, device="cuda")
-    K = torch.randn(B, H, seq_len, D, dtype=torch.float16, device="cuda")
-    V = torch.randn(B, H, seq_len, D, dtype=torch.float16, device="cuda")
+    Q = torch.randn(B, H, seq_len, D, dtype=torch.float32, device="cuda")
+    K = torch.randn(B, H, seq_len, D, dtype=torch.float32, device="cuda")
+    V = torch.randn(B, H, seq_len, D, dtype=torch.float32, device="cuda")
 
     out_fused = flash_attention(Q, K, V, causal=causal)
-    out_ref   = naive_attention(Q, K, V, causal=causal).half()
+    out_ref   = naive_attention(Q, K, V, causal=causal)
 
     max_err = (out_fused - out_ref).abs().max().item()
     mean_err = (out_fused - out_ref).abs().mean().item()
-    ok = max_err < 0.02  # FP16 tolerance
+    ok = max_err < 1e-3
 
     print(f"max_err={max_err:.6f}  mean_err={mean_err:.6f}  pass={ok}")
     return ok
