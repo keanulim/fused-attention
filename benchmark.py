@@ -70,9 +70,16 @@ def run_attention_benchmark(
     import torch
     import torch.nn.functional as F
 
-    from ops.attention import _load_naive_extension, cuda_naive_attention, naive_attention
+    from ops.attention import (
+        _load_extension,
+        _load_naive_extension,
+        cuda_naive_attention,
+        flash_attention,
+        naive_attention,
+    )
 
     _load_naive_extension()
+    _load_extension()
 
     device = "cuda"
     shape = (batch, heads, seq_len, head_dim)
@@ -92,12 +99,24 @@ def run_attention_benchmark(
     def sdpa_f16() -> torch.Tensor:
         return F.scaled_dot_product_attention(Q_f16, K_f16, V_f16, is_causal=causal)
 
-    # Correctness spot-check (CUDA naive vs PyTorch naive)
-    out_cuda = cuda_naive_attention(Q_f32, K_f32, V_f32, causal=causal)
+    # Correctness spot-check (CUDA paths vs PyTorch naive)
     out_ref = naive_attention(Q_f32, K_f32, V_f32, causal=causal)
-    max_err = (out_cuda - out_ref).abs().max().item()
+    out_cuda = cuda_naive_attention(Q_f32, K_f32, V_f32, causal=causal)
+    out_flash = flash_attention(Q_f32, K_f32, V_f32, causal=causal)
+    max_err_cuda = (out_cuda - out_ref).abs().max().item()
+    max_err_flash = (out_flash - out_ref).abs().max().item()
 
     timings = {
+        "flash": _maybe_time(
+            "flash",
+            flash_attention,
+            Q_f32,
+            K_f32,
+            V_f32,
+            causal=causal,
+            warmup=warmup,
+            iters=iters,
+        ),
         "cuda_naive": _maybe_time(
             "cuda_naive",
             cuda_naive_attention,
@@ -143,7 +162,8 @@ def run_attention_benchmark(
         "heads": heads,
         "head_dim": head_dim,
         "causal": causal,
-        "max_err_cuda_vs_ref": round(max_err, 6),
+        "max_err_cuda_vs_ref": round(max_err_cuda, 6),
+        "max_err_flash_vs_ref": round(max_err_flash, 6),
         "naive_attn_matrix_mb": round(attn_matrix_bytes / 1e6, 1),
         "warmup": warmup,
         "iters": iters,
@@ -160,9 +180,20 @@ def run_attention_benchmark(
             result[f"{name}_bw_GBs"] = round(bw, 1)
 
     cuda_ms = timings["cuda_naive"]["ms"]
+    flash_ms = timings["flash"]["ms"]
+    sdpa_f32_ms = timings["sdpa_f32"]["ms"]
     sdpa_ms = timings["sdpa_f16"]["ms"]
+    pytorch_ms = timings["pytorch_naive"]["ms"]
     if cuda_ms and sdpa_ms and cuda_ms > 0:
         result["cuda_vs_sdpa_f16"] = round(cuda_ms / sdpa_ms, 2)
+    if flash_ms and sdpa_ms and flash_ms > 0:
+        result["flash_vs_sdpa_f16"] = round(flash_ms / sdpa_ms, 2)
+    if flash_ms and sdpa_f32_ms and flash_ms > 0:
+        result["flash_vs_sdpa_f32"] = round(flash_ms / sdpa_f32_ms, 2)
+    if flash_ms and pytorch_ms and flash_ms > 0:
+        result["flash_vs_pytorch_naive"] = round(flash_ms / pytorch_ms, 2)
+    if flash_ms and cuda_ms and flash_ms > 0:
+        result["flash_vs_cuda_naive"] = round(cuda_ms / flash_ms, 2)
     if timings["pytorch_naive"]["ms"] and cuda_ms:
         result["cuda_vs_pytorch_naive"] = round(
             cuda_ms / timings["pytorch_naive"]["ms"], 2
@@ -174,12 +205,13 @@ def run_attention_benchmark(
 def format_benchmark_row(r: dict[str, Any]) -> str:
     return (
         f"{r['seq_len']:>8}  "
+        f"{_fmt_ms(r.get('flash_ms')):>10}  "
         f"{_fmt_ms(r.get('cuda_naive_ms')):>12}  "
         f"{_fmt_ms(r.get('pytorch_naive_ms')):>12}  "
         f"{_fmt_ms(r.get('sdpa_f32_ms')):>10}  "
         f"{_fmt_ms(r.get('sdpa_f16_ms')):>10}  "
         f"{r.get('naive_attn_matrix_mb', 0):>8.0f}  "
-        f"{r.get('cuda_naive_peak_gb', 0) or 0:>8.2f}"
+        f"{r.get('flash_peak_gb', 0) or 0:>8.2f}"
     )
 
 
@@ -192,6 +224,7 @@ def _fmt_ms(value: float | None) -> str:
 def print_benchmark_header() -> None:
     print(
         f"\n{'seq_len':>8}  "
+        f"{'flash':>10}  "
         f"{'cuda_naive':>12}  "
         f"{'pytorch_naive':>12}  "
         f"{'sdpa_f32':>10}  "
@@ -199,5 +232,5 @@ def print_benchmark_header() -> None:
         f"{'N^2 MB':>8}  "
         f"{'peak GB':>8}"
     )
-    print("-" * 88)
+    print("-" * 98)
     print("Times in ms (lower is better). N^2 MB = attention matrix size per batch (all heads).")
